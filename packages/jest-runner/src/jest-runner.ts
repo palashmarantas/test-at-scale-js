@@ -98,9 +98,11 @@ class JestRunner implements TestRunner {
         return discoveryResult;
     }
 
-    async executeTests(argv: parser.Arguments): Promise<ExecutionResult> {
+    async executeTests(argv: parser.Arguments): Promise<ExecutionResult[]> {
         Validations.validateExecutionEnv(argv);
-        const postTestResultsEndpoint = process.env.ENDPOINT_POST_TEST_RESULTS as string || "";
+        const n = argv.n as number || 1
+        const skipTestStats = argv.skipteststats as boolean || false;
+        const postTestResultsEndpoint = (skipTestStats) ? "" : (process.env.ENDPOINT_POST_TEST_RESULTS as string || "");
         const taskID = process.env.TASK_ID as ID;
         const buildID = process.env.BUILD_ID as ID;
         const orgID = process.env.ORG_ID as ID;
@@ -127,38 +129,44 @@ class JestRunner implements TestRunner {
         }
 
 
+        const executionResults: ExecutionResult[] = []
         const testFilesToProcessList = Array.from(testFilesToProcess);
         if (testFilesToProcessList.length == 0) {
-            return new ExecutionResult(taskID, buildID, repoID, commitID, orgID);
+            executionResults.push(new ExecutionResult(taskID, buildID, repoID, commitID, orgID));
+            return executionResults
         }
+
         const [regex, blockListedLocators] = this.getBlockListedTestAndTestRegex(testFilesToProcessList, testLocators)
+        for (let i=1; i<=n; i++) {       
+            await this.runJest(
+                testFilesToProcessList,
+                regex,
+                [require.resolve("./jest-reporter")],
+                true
+            );
+            const executionResult = ExecutionResult.fromJSON(await JSONStream.parse(fs.createReadStream(REPORT_FILE)));
 
-        await this.runJest(
-            testFilesToProcessList,
-            regex,
-            [require.resolve("./jest-reporter")],
-            true
-        );
-        const executionResult = ExecutionResult.fromJSON(await JSONStream.parse(fs.createReadStream(REPORT_FILE)));
-
-        if (cleanup) {
-            await fs.promises.rm(TAS_DIRECTORY, { recursive: true });
-        }
-        Util.handleDuplicateTests(executionResult.testResults);
-        if (locators.length > 0) {
-            executionResult.testResults = Util.filterTestResultsByTestLocator(executionResult.testResults,
-                testLocators, blockListedLocators)
-            if (executionResult.testSuiteResults.length > 0) {
-                executionResult.testSuiteResults = Util.filterTestSuiteResults(executionResult.testResults,
-                    executionResult.testSuiteResults)
+            if (cleanup) {
+                await fs.promises.rm(TAS_DIRECTORY, { recursive: true });
             }
-        }
-        if (postTestResultsEndpoint) {
-            await Util.makeApiRequestPost(postTestResultsEndpoint, executionResult);
+            Util.handleDuplicateTests(executionResult.testResults);
+            if (locators.length > 0) {
+                executionResult.testResults = Util.filterTestResultsByTestLocator(executionResult.testResults,
+                    testLocators, blockListedLocators)
+                if (executionResult.testSuiteResults.length > 0) {
+                    executionResult.testSuiteResults = Util.filterTestSuiteResults(executionResult.testResults,
+                        executionResult.testSuiteResults)
+                }
+            }
+            if (postTestResultsEndpoint) {
+                await Util.makeApiRequestPost(postTestResultsEndpoint, executionResult);
 
+            }
+            executionResults.push(executionResult)
         }
-
-        return executionResult;
+        const testfilepath = process.env.TEST_RESULT_FILE_PATH as string;
+        fs.writeFileSync(testfilepath, JSON.stringify(executionResults));
+        return executionResults;
     }
 
     private async runJest(

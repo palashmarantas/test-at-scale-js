@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-/* eslint-disable @typescript-eslint/no-empty-function */
+//* eslint-disable @typescript-eslint/no-empty-function */
 
 import glob from "fast-glob";
 import path from "path";
 import crypto from "crypto";
 import parser from "yargs-parser";
 import { hideBin } from "yargs/helpers";
+import fs from "fs";
 
 import {
     DiscoveryResult,
@@ -65,12 +66,14 @@ class JasmineRunner implements TestRunner {
         }
     }
 
-    async executeTests(argv: parser.Arguments): Promise<ExecutionResult> {
+    async executeTests(argv: parser.Arguments): Promise<ExecutionResult[]> {
         const runTask = new Task<ExecutionResult>();
         const entityIdFilenameMap = new Map<number, string>();
 
         Validations.validateExecutionEnv(argv);
-        const postTestResultsEndpoint = process.env.ENDPOINT_POST_TEST_RESULTS as string || "";
+        const n = argv.n as number || 1
+        const skipTestStats = argv.skipteststats as boolean || false;
+        const postTestResultsEndpoint = (skipTestStats) ? "" : (process.env.ENDPOINT_POST_TEST_RESULTS as string || "");
         const taskID = process.env.TASK_ID as ID;
         const buildID = process.env.BUILD_ID as ID;
         const orgID = process.env.ORG_ID as ID;
@@ -95,40 +98,48 @@ class JasmineRunner implements TestRunner {
             } else {
                 testFilesToProcess = Util.getFilesFromTestLocators(testLocators)
             }
+            const executionResults: ExecutionResult[] = []
             const testFilesToProcessList = Array.from(testFilesToProcess);
             if (testFilesToProcessList.length == 0) {
-                return new ExecutionResult(taskID, buildID, repoID, commitID, orgID);
+                executionResults.push(new ExecutionResult(taskID, buildID, repoID, commitID, orgID));
+                return executionResults
             }
 
             if (!testFilesToProcessList) {
-                return new ExecutionResult(taskID, buildID, repoID, commitID, orgID);
+                executionResults.push(new ExecutionResult(taskID, buildID, repoID, commitID, orgID));
+                return executionResults
             }
 
-            const jasmineObj = await this.createJasmineRunner(argv.config);
-            await this.loadSpecs(jasmineObj, testFilesToProcessList, entityIdFilenameMap);
-            const specIdsToRun: number[] = [];
-            this.fetchSpecIdsToRun(jasmine.getEnv().topSuite(), specIdsToRun, entityIdFilenameMap,
-                testLocators, blockListedLocators);
-            if (specIdsToRun.length == 0) {
-                // pushing an invalid specID because if we pass empty array, it runs all specs
-                specIdsToRun.push(-1);
-            }
-            const reporter = new CustomReporter(runTask, entityIdFilenameMap);
-            jasmineObj.env.addReporter(reporter);
-            await jasmine.getEnv().execute(specIdsToRun as unknown as jasmine.Suite[]);
-            const executionResults = await runTask.promise;
-            Util.handleDuplicateTests(executionResults.testResults);
-            if (locators.length > 0) {
-                executionResults.testResults = Util.filterTestResultsByTestLocator(executionResults.testResults,
-                    testLocators, blockListedLocators)
-                if (executionResults.testSuiteResults.length > 0) {
-                    executionResults.testSuiteResults = Util.filterTestSuiteResults(executionResults.testResults,
-                        executionResults.testSuiteResults)
+            for (let i=1; i<=n; i++) {    
+                const jasmineObj = await this.createJasmineRunner(argv.config);
+                await this.loadSpecs(jasmineObj, testFilesToProcessList, entityIdFilenameMap);
+                const specIdsToRun: number[] = [];
+                this.fetchSpecIdsToRun(jasmine.getEnv().topSuite(), specIdsToRun, entityIdFilenameMap,
+                    testLocators, blockListedLocators);
+                if (specIdsToRun.length == 0) {
+                    // pushing an invalid specID because if we pass empty array, it runs all specs
+                    specIdsToRun.push(-1);
                 }
+                const reporter = new CustomReporter(runTask, entityIdFilenameMap);
+                jasmineObj.env.addReporter(reporter);
+                await jasmine.getEnv().execute(specIdsToRun as unknown as jasmine.Suite[]);
+                const executionResult = await runTask.promise;
+                Util.handleDuplicateTests(executionResult.testResults);
+                if (locators.length > 0) {
+                    executionResult.testResults = Util.filterTestResultsByTestLocator(executionResult.testResults,
+                        testLocators, blockListedLocators)
+                    if (executionResult.testSuiteResults.length > 0) {
+                        executionResult.testSuiteResults = Util.filterTestSuiteResults(executionResult.testResults,
+                            executionResult.testSuiteResults)
+                    }
+                }
+                if (postTestResultsEndpoint) {
+                    await Util.makeApiRequestPost(postTestResultsEndpoint, executionResult);
+                }
+                executionResults.push(executionResult)
             }
-            if (postTestResultsEndpoint) {
-                await Util.makeApiRequestPost(postTestResultsEndpoint, executionResults);
-            }
+            const testfilepath = process.env.TEST_RESULT_FILE_PATH as string;     
+            fs.writeFileSync(testfilepath, JSON.stringify(executionResults)); 
             return executionResults;
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } catch (err: any) {
